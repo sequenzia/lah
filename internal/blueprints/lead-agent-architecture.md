@@ -48,15 +48,19 @@ flowchart TD
     logfire["Logfire (cloud)<br/>traces, evals, costs"]:::warning
     lead --> logfire
 
-    classDef primary fill:#dbeafe,stroke:#2563eb,color:#000
-    classDef secondary fill:#f3e8ff,stroke:#7c3aed,color:#000
-    classDef success fill:#dcfce7,stroke:#16a34a,color:#000
-    classDef warning fill:#fef3c7,stroke:#d97706,color:#000
-    classDef neutral fill:#f3f4f6,stroke:#6b7280,color:#000
+    classDef primary fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#000
+    classDef secondary fill:#f3e8ff,stroke:#6b21a8,stroke-width:2px,color:#000
+    classDef success fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#000
+    classDef warning fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#000
+    classDef neutral fill:#f3f4f6,stroke:#4b5563,stroke-width:2px,color:#000
 
-    style mac fill:#f8fafc,stroke:#94a3b8,color:#000
-    style lead fill:#ffffff,stroke:#64748b,color:#000
-    style subagents fill:#ffffff,stroke:#64748b,color:#000
+    style mac fill:#f1f5f9,stroke:#334155,stroke-width:2px,color:#000
+    style lead fill:#ffffff,stroke:#1e293b,stroke-width:2px,color:#000
+    style subagents fill:#ffffff,stroke:#1e293b,stroke-width:2px,color:#000
+
+    linkStyle default stroke:#1e293b,stroke-width:2px,color:#000
+    linkStyle 1 stroke:#475569,stroke-width:2px,stroke-dasharray:5 5,color:#000
+    linkStyle 5 stroke:#475569,stroke-width:2px,stroke-dasharray:5 5,color:#000
 ```
 
 The lead agent is a single Python process. It owns the conversation state, picks tools, and decides when to delegate. Inbound user messages arrive as HMAC-signed webhook POSTs from AMC; outbound replies and read-acks go back over AMC's REST API. Delegation tools spawn subprocess children in isolated git worktrees, register them in SQLite, and (for long jobs) hand control to a DBOS workflow that polls and reports. The active SOUL (`souls/<active>.md`) is prepended to `prompts/system.md` at boot to give the agent a consistent voice without entangling personality with operational rules.
