@@ -1,6 +1,6 @@
-# Lead Agent Architecture
+# Lead Agent Harness
 
-A Pydantic AI based personal orchestrator for Mac mini. The lead agent fields requests from you, handles trivial tasks itself, and delegates real work to Claude Code and Codex while supervising them.
+A Pydantic AI based personal orchestrator for Mac mini. The harness is a thin set of primitives — an agent loop, a few tools, a SQLite store, a durable workflow runtime, and a webhook listener — wired together to field requests from you, handle trivial tasks itself, and delegate real work to Claude Code and Codex while supervising them. It is intentionally small enough to read in an evening.
 
 ## Design principles
 
@@ -17,41 +17,49 @@ A Pydantic AI based personal orchestrator for Mac mini. The lead agent fields re
 ┌──────────────────────────────────────────────────────────────────┐
 │                      Mac mini (always on)                        │
 │                                                                  │
-│  ┌────────────────┐    ┌──────────────────────────────────────┐  │
-│  │   Messaging    │    │       Lead Agent (Pydantic AI)       │  │
-│  │    Gateway     │───▶│                                      │  │
-│  │  (Telegram,    │    │  ┌─────────┐    ┌────────────────┐   │  │
-│  │   Slack, CLI)  │◀───│  │  Agent  │───▶│ Tools          │   │  │
-│  └────────────────┘    │  │  Loop   │    │ ─ web_search   │   │  │
-│                        │  │         │    │ ─ shell_exec   │   │  │
-│                        │  └─────────┘    │ ─ delegate_*   │   │  │
-│                        │       │         │ ─ check_status │   │  │
-│                        │       ▼         └────────────────┘   │  │
-│                        │  ┌──────────────────────────────┐    │  │
-│                        │  │  DBOS durable workflow runtime│   │  │
-│                        │  └──────────────────────────────┘    │  │
-│                        │       │                              │  │
-│                        │       ▼                              │  │
-│                        │  ┌──────────────────────────────┐    │  │
-│                        │  │  SQLite (state, memory, logs)│    │  │
-│                        │  └──────────────────────────────┘    │  │
-│                        └──────────────────────────────────────┘  │
-│                                       │                          │
-│              ┌────────────────────────┼─────────────────────┐    │
-│              ▼                        ▼                     ▼    │
+│  ┌──────────────┐  webhook   ┌────────────────────────────────┐  │
+│  │     AMC      │──POST────▶│     Lead Agent (Pydantic AI)   │  │
+│  │  (separate   │            │                                │  │
+│  │   process,   │   REST     │  ┌─────────┐  ┌─────────────┐  │  │
+│  │  iMessage +  │◀──send────│  │  Agent  │─▶│ Tools       │  │  │
+│  │  Discord)    │  mark_read │  │  Loop   │  │ ─ web_search│  │  │
+│  └──────────────┘            │  └────┬────┘  │ ─ shell_exec│  │  │
+│                              │       │       │ ─ delegate_*│  │  │
+│                              │       │       │ ─ status    │  │  │
+│                              │       │       └─────────────┘  │  │
+│                              │       │                        │  │
+│                              │  ┌────┴────────────────────┐   │  │
+│                              │  │ instructions =          │   │  │
+│                              │  │   souls/<active>.md     │   │  │
+│                              │  │   + prompts/system.md   │   │  │
+│                              │  └─────────────────────────┘   │  │
+│                              │       │                        │  │
+│                              │       ▼                        │  │
+│                              │  ┌─────────────────────────┐   │  │
+│                              │  │ DBOS durable workflows  │   │  │
+│                              │  └─────────────┬───────────┘   │  │
+│                              │                │               │  │
+│                              │                ▼               │  │
+│                              │  ┌─────────────────────────┐   │  │
+│                              │  │ SQLite (state, history) │   │  │
+│                              │  └─────────────────────────┘   │  │
+│                              └────────────┬───────────────────┘  │
+│                                           │                      │
+│              ┌────────────────────────────┼──────────────────┐   │
+│              ▼                            ▼                  ▼   │
 │      ┌──────────────┐         ┌──────────────┐      ┌──────────┐ │
 │      │ Claude Code  │         │ Claude Code  │      │  Codex   │ │
 │      │ subprocess A │         │ subprocess B │      │ subproc. │ │
 │      │ (worktree-1) │         │ (worktree-2) │      │ (sandbox)│ │
 │      └──────────────┘         └──────────────┘      └──────────┘ │
 └──────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼
-                                  Logfire (cloud)
-                              (traces, evals, costs)
+                                           │
+                                           ▼
+                                      Logfire (cloud)
+                                 (traces, evals, costs)
 ```
 
-The lead agent is a single Python process. It owns the conversation state, picks tools, and decides when to delegate. Delegation tools spawn subprocess children in isolated git worktrees, register them in SQLite, and (for long jobs) hand control to a DBOS workflow that polls and reports.
+The lead agent is a single Python process. It owns the conversation state, picks tools, and decides when to delegate. Inbound user messages arrive as HMAC-signed webhook POSTs from AMC; outbound replies and read-acks go back over AMC's REST API. Delegation tools spawn subprocess children in isolated git worktrees, register them in SQLite, and (for long jobs) hand control to a DBOS workflow that polls and reports. The active SOUL (`souls/<active>.md`) is prepended to `prompts/system.md` at boot to give the agent a consistent voice without entangling personality with operational rules.
 
 ## Project structure
 
@@ -59,13 +67,16 @@ The lead agent is a single Python process. It owns the conversation state, picks
 lead-agent/
 ├── pyproject.toml
 ├── README.md
-├── .env                          # API keys (Anthropic, OpenAI, Logfire)
-├── config.toml                   # Model choices, paths, defaults
+├── .env                          # API keys + AMC bearer/secret
+├── config.toml                   # Model choices, paths, active soul, AMC settings
+├── souls/                        # Personalities. One file per persona.
+│   ├── default.md                # Active soul (selected via [soul] in config)
+│   └── concise.md                # Example alternate persona
 ├── lead_agent/
 │   ├── __init__.py
-│   ├── main.py                   # Entry point. Boots the agent, gateway, DBOS.
-│   ├── agent.py                  # Pydantic AI Agent definition + system prompt
-│   ├── deps.py                   # RunContext dependencies (db, paths, etc.)
+│   ├── main.py                   # Entry point. Boots agent, AMC listener, DBOS.
+│   ├── agent.py                  # Pydantic AI Agent + composite (SOUL+system) prompt
+│   ├── deps.py                   # RunContext dependencies (db, paths, AMC client)
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── basic.py              # web_search, shell_exec, fetch_url
@@ -79,13 +90,13 @@ lead-agent/
 │   │   ├── __init__.py
 │   │   ├── store.py              # SQLite schema + queries
 │   │   └── conversation.py       # Per-thread message history
-│   ├── gateway/
+│   ├── transport/
 │   │   ├── __init__.py
-│   │   ├── cli.py                # Local terminal interface
-│   │   └── telegram.py           # Telegram bot
+│   │   ├── amc_listener.py       # FastAPI webhook receiver for AMC envelopes
+│   │   └── amc_client.py         # Thin wrapper over AMC REST (send, mark_read)
 │   └── prompts/
-│       ├── system.md             # Lead agent system prompt
-│       └── delegation_brief.md   # Template for briefing subagents
+│       ├── system.md             # Operational rules — what tools exist, when to delegate
+│       └── delegation_brief.md   # Template for briefing subagents (no SOUL)
 ├── tests/
 │   └── ...
 └── scripts/
@@ -105,13 +116,19 @@ from pathlib import Path
 from pydantic_ai import Agent, RunContext
 from .deps import LeadDeps
 from .tools import basic, claude_code, codex, delegations
+from .config import settings
 
-SYSTEM_PROMPT = Path(__file__).parent.joinpath("prompts/system.md").read_text()
+HERE = Path(__file__).parent
+SOUL = (HERE.parent / settings.soul.dir / f"{settings.soul.active}.md").read_text()
+OPS  = HERE.joinpath("prompts/system.md").read_text()
+
+# SOUL first (voice/personality), then operational rules. Cache-stable region.
+INSTRUCTIONS = f"{SOUL}\n\n---\n\n{OPS}"
 
 lead_agent = Agent(
     "anthropic:claude-sonnet-4-6",        # Default; override per-run for cheap routing
     deps_type=LeadDeps,
-    instructions=SYSTEM_PROMPT,
+    instructions=INSTRUCTIONS,
 )
 
 # Register tools
@@ -121,7 +138,7 @@ codex.register(lead_agent)
 delegations.register(lead_agent)
 ```
 
-The system prompt is the contract. It describes available tools, when to delegate vs handle directly, how to brief subagents, and how to report results back to you. Keep it under 1500 tokens.
+The system prompt is the contract. `prompts/system.md` describes available tools, when to delegate vs handle directly, how to brief subagents, and how to report results back to you. Keep it under 1500 tokens. The active SOUL is prepended to it at boot — see the *Persona via SOUL* section below for what belongs in each file. Voice goes in SOUL, operational rules go in `system.md`; do not mix them.
 
 A sketch of the routing logic in the system prompt:
 
@@ -135,7 +152,7 @@ A sketch of the routing logic in the system prompt:
 
 ### Dependencies via RunContext
 
-Pydantic AI's dependency injection is the right place for shared infrastructure: the SQLite connection, the path to your projects directory, the messaging gateway handle. This keeps tools testable and avoids global state.
+Pydantic AI's dependency injection is the right place for shared infrastructure: the SQLite connection, the path to your projects directory, the AMC client. This keeps tools testable and avoids global state.
 
 ```python
 # lead_agent/deps.py
@@ -146,6 +163,7 @@ import sqlite3
 @dataclass
 class LeadDeps:
     db: sqlite3.Connection
+    amc: "AMCClient"          # Used by the listener for send / mark_read
     workspaces_root: Path     # Where subagent worktrees live
     projects_root: Path       # Where your real projects live
     user_id: str              # Used for memory partitioning
@@ -243,7 +261,7 @@ A few details worth flagging:
 
 - **Headless mode.** Use `claude -p "<prompt>"` with `--output-format json` so Claude Code emits structured events to stdout. The orchestrator can stream and persist these.
 - **Worktrees, not branches.** Each delegation gets its own git worktree under `~/.lead-agent/workspaces/<id>`. This is how Conductor and similar Mac tools handle parallel coding agents. You can run three Claude Codes against the same repo without merge conflicts.
-- **Permission mode.** `acceptEdits` is permissive. For risky repos, use `default` and surface approval requests through the messaging gateway.
+- **Permission mode.** `acceptEdits` is permissive. For risky repos, use `default` and surface approval requests back through AMC by sending a question to the originating channel.
 - **Persist before yielding.** The row goes into SQLite before the tool returns. If the lead agent crashes between `subprocess_exec` and the next line, the delegation still gets reaped and tracked.
 
 ### Tool: delegate to Codex
@@ -333,11 +351,59 @@ Pydantic AI's docs explicitly call out DBOS, Temporal, and Prefect as supported 
 
 Why not just rely on Pydantic AI's own agent durability? Because it covers the agent loop (model calls, tool execution) but not unbounded subprocess monitoring. You want the workflow layer for "this delegation will run for an hour or more."
 
+### Persona via SOUL
+
+The harness has a personality layer modeled on OpenClaw's [`SOUL.md`](https://docs.openclaw.ai/concepts/soul). The point is to isolate *voice* — tone, opinions, brevity, humor, default level of bluntness — from operational rules. Mixing them tends to produce two failure modes: an agent that sounds bland and corporate because the system prompt is all rules, or an agent whose tone leaks into how it picks tools because everything is one giant blob. Splitting them keeps each layer authoring-friendly.
+
+**Layout.** Personalities live as plain markdown files in `souls/`. One file per persona — `default.md`, `concise.md`, etc. The active soul is selected in `config.toml`:
+
+```toml
+[soul]
+active = "default"
+dir    = "souls"
+```
+
+Switching personas is a config change plus restart in v0. A runtime swap tool can come later if it proves useful; it isn't needed to validate the design.
+
+**Sections.** Borrowing OpenClaw's structure verbatim, since it has held up well:
+
+- **Core Truths** — non-negotiable facts about who the agent is.
+- **Boundaries** — what it will and won't do, in voice terms (e.g. "don't apologize for tool failures, just report them").
+- **Vibe** — concrete tone rules. Author behavior, not values.
+- **Continuity** — how it refers to past conversations and ongoing work.
+- **Related** — pointers to other files (AGENTS-equivalent, tool docs, project memory) for the curious reader.
+
+**Loading.** At process start, `lead_agent/agent.py` reads `souls/<active>.md` and prepends it to `prompts/system.md` to form the `instructions=` value passed into `Agent(...)`. SOUL goes first so it sits in the cache-stable region above the tool descriptions Pydantic AI appends. The composite prompt is constructed once per process, not per run.
+
+**Scope rule: orchestrator only.** SOUL is **not** included in delegation briefs. `tools/claude_code.py` and `tools/codex.py` build their prompts from `prompts/delegation_brief.md` plus the structured `Brief` model — never from SOUL. Subagents do real work in real repos; they should be neutral and goal-focused. The voice belongs to the user-facing turn.
+
+**Authoring guide.** Concrete behavioral rules beat abstract values. A few examples in the spirit of OpenClaw's template:
+
+```markdown
+# SOUL — default
+
+## Core Truths
+You are my orchestrator, not a chatbot. You delegate when the task warrants it
+and answer directly when it doesn't.
+
+## Vibe
+- Brevity is mandatory. If the answer fits in one sentence, give one sentence.
+- Never open with "Great question," "I'd be happy to help," or "Absolutely."
+- If I'm about to do something dumb, say so.
+- Be genuinely helpful, not performatively helpful.
+
+## Boundaries
+- Don't narrate tool calls. Report results.
+- Don't ask permission for routine work I've already approved.
+```
+
+Keep each soul under ~50 lines. Skip life stories, mission statements, and "maintain a positive supportive experience" mush — those are the patterns OpenClaw flags as ineffective. If a rule wouldn't change a single response, it doesn't belong here.
+
 ### Memory and state
 
 Two stores, both in the same SQLite file:
 
-**Conversation memory.** Per-thread message history, keyed by gateway and channel. Used by the lead agent to maintain context with you across messages. Implement as a simple table with `(thread_id, ts, role, content)` and feed the last N messages into each agent run via `message_history`.
+**Conversation memory.** Per-thread message history, keyed by AMC `channel_id` (prefixed `amc:` to leave room for future sources). Used by the lead agent to maintain context with you across messages. Implement as a simple table with `(thread_id, ts, role, content)` and feed the last N messages into each agent run via `message_history`.
 
 **Delegation state.** The source of truth for "what is the agent currently working on." Schema:
 
@@ -366,32 +432,55 @@ CREATE TABLE delegation_output (
 
 For project-specific knowledge (preferences, conventions, "this repo uses pnpm not npm"), start with a flat markdown file per project loaded into the system prompt at run time. Avoid a vector database until you have a concrete reason for one. Hermes does FTS5 full-text search across past conversations, which is a reasonable next step if simple recall isn't enough.
 
-## Messaging gateway
+## Messaging via AMC
 
-You want to talk to this agent from your phone. Two reasonable paths:
+The harness does not own messaging. A separate process — [AMC](file:///Users/ada/amc), the Agent Messaging Channel — handles iMessage and Discord (and any future connectors) and exposes a normalized HTTP/webhook API on `127.0.0.1:8080`. AMC owns the platform connectors, the sender allowlist, the quarantine flow, and the canonical message envelope. The lead agent is just one of its consumers.
 
-**Path A (simplest): Telegram bot.** Run a tiny `aiogram` or `python-telegram-bot` process in the same Python service. On message, look up the thread, append to conversation memory, run the agent, stream the response back. About 100 lines of code.
+This is a deliberate boundary. Connector code (Apple chat.db scraping, Discord gateway, etc.) is fiddly and stateful; keeping it in its own process means it can crash and restart without touching agent state, and means new connectors land in AMC without any change to the harness.
 
-**Path B (more flexible): MCP messaging servers.** Hermes-style. Run third-party MCP servers for Telegram, Slack, Discord, etc., and let the lead agent treat them as tools (`send_telegram_message`, `read_slack_dms`). More moving parts, but you don't write or maintain the integrations.
-
-Start with Path A. Add Path B if you outgrow it.
+**Inbound (webhook push).** AMC POSTs HMAC-SHA256-signed envelopes to a webhook URL of our choosing. The lead agent runs a small FastAPI listener at `lead_agent/transport/amc_listener.py`:
 
 ```python
-# lead_agent/gateway/telegram.py (sketch)
-async def on_message(msg):
-    thread_id = f"tg-{msg.chat.id}"
-    history = load_history(thread_id, limit=20)
+# lead_agent/transport/amc_listener.py (sketch)
+import hmac, hashlib
+from fastapi import FastAPI, Header, HTTPException, Request
+from .amc_client import amc
+from ..agent import lead_agent
+from ..memory.conversation import load_history, save_message
 
-    result = await lead_agent.run(
-        msg.text,
-        deps=deps,
-        message_history=history,
-    )
+app = FastAPI()
 
-    save_message(thread_id, "user", msg.text)
+@app.post("/amc/webhook")
+async def on_amc(req: Request, x_amc_signature: str = Header(...)):
+    body = await req.body()
+    expected = hmac.new(settings.amc.webhook_secret.encode(),
+                       body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, x_amc_signature):
+        raise HTTPException(401, "bad signature")
+
+    env = await req.json()                   # AMC envelope
+    thread_id = f"amc:{env['channel_id']}"
+    history   = load_history(thread_id, limit=20)
+
+    result = await lead_agent.run(env["text"], deps=deps, message_history=history)
+
+    save_message(thread_id, "user",      env["text"])
     save_message(thread_id, "assistant", result.output)
-    await msg.reply(result.output)
+    await amc.send(channel_id=env["channel_id"], text=result.output)
+    await amc.mark_read(message_id=env["id"])
+    return {"ok": True}
 ```
+
+A few details worth flagging:
+
+- **Signature verification first.** Reject anything that doesn't match `X-AMC-Signature` before parsing or logging the body.
+- **`channel_id` is the thread key.** AMC's envelope already namespaces channels (`+15551234567`, `discord:dm:123`, etc.); prefix with `amc:` and use as `thread_id` directly.
+- **Outbound is not an agent tool.** `amc.send` and `amc.mark_read` live in `transport/amc_client.py` and are called by the listener after the run completes — not exposed as Pydantic AI tools. The agent produces output once per turn; the harness delivers it. Making `send` a tool just invites the model to spam the user.
+- **Per-agent cursor.** Set `X-Agent-ID: lead-agent` on every AMC request so AMC can isolate read cursors if you ever run a second consumer alongside this one.
+
+**Configuration.** AMC's webhook config points at the lead agent: in AMC's `.env`, `AMC_WEBHOOK_URL=http://127.0.0.1:8090/amc/webhook` and `AMC_WEBHOOK_SECRET=<shared>`. In the lead agent's `.env`, `AMC_BASE_URL=http://127.0.0.1:8080`, `AMC_BEARER_TOKEN=<same-as-AMC>`, `AMC_WEBHOOK_SECRET=<same-shared>`, `AMC_AGENT_ID=lead-agent`. The two processes share the bearer token and the webhook secret; nothing else.
+
+**Allowlist lives in AMC.** Adding a phone number or Discord user is a TOML edit at `~/.config/messaging-agent/allowlist.toml`, not a harness concern. Unknown senders quarantine in AMC and never reach the lead agent.
 
 ## Configuration
 
@@ -409,6 +498,16 @@ workspaces_root = "~/.lead-agent/workspaces"
 projects_root   = "~/code"
 db_path         = "~/.lead-agent/state.db"
 
+[soul]
+active = "default"                          # picks souls/default.md
+dir    = "souls"
+
+[amc]
+base_url    = "http://127.0.0.1:8080"
+agent_id    = "lead-agent"
+listen_host = "127.0.0.1"
+listen_port = 8090                          # AMC's AMC_WEBHOOK_URL points here
+
 [agents.claude_code]
 binary = "claude"
 default_permission_mode = "acceptEdits"
@@ -418,15 +517,11 @@ worktree_base_branch = "main"
 binary = "codex"
 default_sandbox = "modal"
 
-[gateway]
-telegram_enabled = true
-cli_enabled = true
-
 [observability]
 logfire_enabled = true
 ```
 
-API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `LOGFIRE_TOKEN`, `TELEGRAM_BOT_TOKEN`) live in `.env` and never in `config.toml`.
+API keys and shared secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `LOGFIRE_TOKEN`, `AMC_BEARER_TOKEN`, `AMC_WEBHOOK_SECRET`) live in `.env` and never in `config.toml`.
 
 ## Observability
 
@@ -444,7 +539,7 @@ For delegations specifically, log a custom span per delegation lifecycle so you 
 
 ## Deployment on Mac mini
 
-The lead agent is one long-lived Python process plus a couple of subprocess gateways. `launchd` is the right tool. Skip `tmux` or `screen`; they don't survive reboots cleanly.
+The lead agent is one long-lived Python process that spawns subagent subprocesses on demand. `launchd` is the right tool. Skip `tmux` or `screen`; they don't survive reboots cleanly.
 
 ```xml
 <!-- ~/Library/LaunchAgents/com.you.leadagent.plist -->
@@ -485,6 +580,7 @@ Load with `launchctl load ~/Library/LaunchAgents/com.you.leadagent.plist`. The `
 
 A few Mac mini specifics worth getting right:
 
+- **AMC is a sibling launchd job.** AMC has its own `com.you.amc.plist`. The lead agent depends on AMC being up but does not supervise it. If AMC is down, webhook deliveries simply queue inside AMC (per its retry worker) and arrive when the lead agent's listener is reachable again.
 - **Disable App Nap** for the venv's Python, or long-running runs may throttle when the user session is inactive.
 - **Caffeinate when delegations are active.** A small helper that runs `caffeinate -i` while any delegation is in `running` state prevents the machine from sleeping mid-task.
 - **Filesystem.** Worktrees on the SSD, not on iCloud Drive. Git worktrees in iCloud are a recipe for corrupted repos.
@@ -493,20 +589,22 @@ A few Mac mini specifics worth getting right:
 
 A realistic build order:
 
-1. **v0 (one weekend).** Pydantic AI agent with `web_search`, `shell_exec`, `delegate_to_claude_code`. CLI gateway only. SQLite for delegation state. Synchronous delegation with a hard timeout. No DBOS yet. Goal: prove the loop works.
+1. **v0 (one weekend).** Pydantic AI agent with `web_search`, `shell_exec`, `delegate_to_claude_code`. AMC webhook listener wired up. One soul (`souls/default.md`). SQLite for delegation state. Synchronous delegation with a hard timeout. No DBOS yet. Goal: prove the loop works end-to-end — message in via AMC, reply out via AMC, one delegation completes.
 
 2. **v1 (next weekend).** Add `delegate_to_codex`, `check_delegation_status`, `get_delegation_output`, `kill_delegation`. Add DBOS-backed `monitor_delegation` workflow. Add Logfire. Goal: 90-minute delegations work and survive a `kill -9` of the lead agent.
 
-3. **v2.** Telegram gateway. Per-project memory files. Multi-delegation summaries. Approval flows for risky tool calls (Pydantic AI supports tool approval natively).
+3. **v2.** Additional personas in `souls/`. Per-project memory files. Multi-delegation summaries. Approval flows for risky tool calls (Pydantic AI supports tool approval natively).
 
-4. **v3+.** MCP messaging servers, calendar awareness, scheduled tasks, evals (Pydantic Evals) for the routing decisions, second opinions across delegations.
+4. **v3+.** Calendar awareness, scheduled tasks, evals (Pydantic Evals) for routing decisions, second opinions across delegations. New connectors (Slack, etc.) land in AMC, not here — the harness gets them for free.
 
 Resist building v3 features into v0. The harness is small on purpose.
 
 ## Why this works for your case
 
-- The lead agent stays small (~500 lines including tools). You can read and modify it.
+- The harness stays small (~500 lines of Python plus a handful of markdown files in `souls/` and `prompts/`). You can read and modify it.
 - Pydantic AI gives you the agent loop, structured tools, dependency injection, durable execution adapters, observability, and model flexibility for free.
 - DBOS handles the "long-running task survives restarts" problem that no agent SDK solves cleanly on its own.
+- AMC is reused, not reinvented. iMessage, Discord, and any future connectors live behind a single normalized envelope you don't own and don't have to maintain.
+- SOUL keeps voice editable as plain markdown, separate from operational rules. Tweaking how the agent sounds doesn't risk breaking how it routes.
 - Claude Code and Codex stay in the roles they're best at (coding subagents) and never have to be your orchestrator.
 - The whole thing runs on a Mac mini, costs only the API tokens you actually use, and you own every line.
