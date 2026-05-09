@@ -13,50 +13,50 @@ A Pydantic AI based personal orchestrator for Mac mini. The harness is a thin se
 
 ## High-level architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      Mac mini (always on)                        │
-│                                                                  │
-│  ┌──────────────┐  webhook   ┌────────────────────────────────┐  │
-│  │     AMC      │──POST────▶│     Lead Agent (Pydantic AI)   │  │
-│  │  (separate   │            │                                │  │
-│  │   process,   │   REST     │  ┌─────────┐  ┌─────────────┐  │  │
-│  │  iMessage +  │◀──send────│  │  Agent  │─▶│ Tools       │  │  │
-│  │  Discord)    │  mark_read │  │  Loop   │  │ ─ web_search│  │  │
-│  └──────────────┘            │  └────┬────┘  │ ─ shell_exec│  │  │
-│                              │       │       │ ─ delegate_*│  │  │
-│                              │       │       │ ─ status    │  │  │
-│                              │       │       └─────────────┘  │  │
-│                              │       │                        │  │
-│                              │  ┌────┴────────────────────┐   │  │
-│                              │  │ instructions =          │   │  │
-│                              │  │   souls/<active>.md     │   │  │
-│                              │  │   + prompts/system.md   │   │  │
-│                              │  └─────────────────────────┘   │  │
-│                              │       │                        │  │
-│                              │       ▼                        │  │
-│                              │  ┌─────────────────────────┐   │  │
-│                              │  │ DBOS durable workflows  │   │  │
-│                              │  └─────────────┬───────────┘   │  │
-│                              │                │               │  │
-│                              │                ▼               │  │
-│                              │  ┌─────────────────────────┐   │  │
-│                              │  │ SQLite (state, history) │   │  │
-│                              │  └─────────────────────────┘   │  │
-│                              └────────────┬───────────────────┘  │
-│                                           │                      │
-│              ┌────────────────────────────┼──────────────────┐   │
-│              ▼                            ▼                  ▼   │
-│      ┌──────────────┐         ┌──────────────┐      ┌──────────┐ │
-│      │ Claude Code  │         │ Claude Code  │      │  Codex   │ │
-│      │ subprocess A │         │ subprocess B │      │ subproc. │ │
-│      │ (worktree-1) │         │ (worktree-2) │      │ (sandbox)│ │
-│      └──────────────┘         └──────────────┘      └──────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-                                           │
-                                           ▼
-                                      Logfire (cloud)
-                                 (traces, evals, costs)
+```mermaid
+flowchart TD
+    subgraph mac["Mac mini (always on)"]
+        direction TB
+        AMC["AMC<br/>iMessage + Discord<br/>(separate process)"]:::secondary
+
+        subgraph lead["Lead Agent (Pydantic AI)"]
+            direction TB
+            loop["Agent Loop"]:::primary
+            tools["Tools<br/>web_search • shell_exec<br/>delegate_* • status"]:::primary
+            instructions["instructions =<br/>souls/&lt;active&gt;.md +<br/>prompts/system.md"]:::neutral
+            dbos["DBOS durable workflows"]:::primary
+            db[("SQLite<br/>state, history")]:::neutral
+
+            loop <--> tools
+            instructions -.-> loop
+            loop --> dbos
+            dbos --> db
+        end
+
+        subgraph subagents["Subagent subprocesses"]
+            direction LR
+            cc_a["Claude Code A<br/>(worktree-1)"]:::success
+            cc_b["Claude Code B<br/>(worktree-2)"]:::success
+            codex["Codex<br/>(sandbox)"]:::success
+        end
+
+        AMC -->|webhook POST| loop
+        loop -.->|REST: send / mark_read| AMC
+        dbos --> subagents
+    end
+
+    logfire["Logfire (cloud)<br/>traces, evals, costs"]:::warning
+    lead --> logfire
+
+    classDef primary fill:#dbeafe,stroke:#2563eb,color:#000
+    classDef secondary fill:#f3e8ff,stroke:#7c3aed,color:#000
+    classDef success fill:#dcfce7,stroke:#16a34a,color:#000
+    classDef warning fill:#fef3c7,stroke:#d97706,color:#000
+    classDef neutral fill:#f3f4f6,stroke:#6b7280,color:#000
+
+    style mac fill:#f8fafc,stroke:#94a3b8,color:#000
+    style lead fill:#ffffff,stroke:#64748b,color:#000
+    style subagents fill:#ffffff,stroke:#64748b,color:#000
 ```
 
 The lead agent is a single Python process. It owns the conversation state, picks tools, and decides when to delegate. Inbound user messages arrive as HMAC-signed webhook POSTs from AMC; outbound replies and read-acks go back over AMC's REST API. Delegation tools spawn subprocess children in isolated git worktrees, register them in SQLite, and (for long jobs) hand control to a DBOS workflow that polls and reports. The active SOUL (`souls/<active>.md`) is prepended to `prompts/system.md` at boot to give the agent a consistent voice without entangling personality with operational rules.
