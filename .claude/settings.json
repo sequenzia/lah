@@ -1,0 +1,9 @@
+{
+  "env": {
+    "CLAUDE_CODE_TASK_LIST_ID": "lah"
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "context7"
+  ]
+}
