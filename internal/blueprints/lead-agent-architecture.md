@@ -1,15 +1,15 @@
-# Lead Agent Harness
+# Sinatra
 
-A Pydantic AI based personal orchestrator for Mac mini. The harness is a thin set of primitives — an agent loop, a few tools, a SQLite store, a durable workflow runtime, and a webhook listener — wired together to field requests from you, handle trivial tasks itself, and delegate real work to Claude Code and Codex while supervising them. It is intentionally small enough to read in an evening.
+Sinatra is a Pydantic AI based personal orchestrator for Mac mini. The harness is a thin set of primitives — an agent loop, a few tools, a SQLite store, a durable workflow runtime, and a webhook listener — wired together to field requests from you, handle trivial tasks itself, and delegate real work to Claude Code and Codex while supervising them. It is intentionally small enough to read in an evening.
 
 ## Design principles
 
 1. **The harness is yours.** The framework provides primitives, not opinions. You can read every line of the orchestrator in an evening.
 2. **Delegation is a tool call.** Spawning Claude Code or Codex is just another tool the agent can choose, with the same telemetry and approval surface as `web_search`.
 3. **Durability is mandatory.** A delegated coding task may run 90 minutes. The orchestrator must survive process restarts, OS reboots, and API failures without losing track of in-flight work.
-4. **Model flexibility.** Use cheap models (Haiku, GPT-5 Mini) for routing decisions. Use Opus for hard reasoning. The lead agent is the only place this choice lives.
-5. **Observable by default.** Every tool call, every delegation, every model call is traced. You should be able to answer "what did the agent do at 3am last Tuesday?" in seconds.
-6. **One process to rule, many to do work.** The lead agent is a single long-lived Python process. Subagents (Claude Code, Codex) are subprocess children with their own working directories.
+4. **Model flexibility.** Use cheap models (Haiku, GPT-5 Mini) for routing decisions. Use Opus for hard reasoning. Sinatra is the only place this choice lives.
+5. **Observable by default.** Every tool call, every delegation, every model call is traced. You should be able to answer "what did Sinatra do at 3am last Tuesday?" in seconds.
+6. **One process to rule, many to do work.** Sinatra is a single long-lived Python process. Subagents (Claude Code, Codex) are subprocess children with their own working directories.
 
 ## High-level architecture
 
@@ -19,7 +19,7 @@ flowchart TD
         direction TB
         AMC["AMC<br/>iMessage + Discord<br/>(separate process)"]:::secondary
 
-        subgraph lead["Lead Agent (Pydantic AI)"]
+        subgraph sinatra["Sinatra (Pydantic AI)"]
             direction TB
             loop["Agent Loop"]:::primary
             tools["Tools<br/>web_search • shell_exec<br/>delegate_* • status"]:::primary
@@ -46,7 +46,7 @@ flowchart TD
     end
 
     logfire["Logfire (cloud)<br/>traces, evals, costs"]:::warning
-    lead --> logfire
+    sinatra --> logfire
 
     classDef primary fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#000
     classDef secondary fill:#f3e8ff,stroke:#6b21a8,stroke-width:2px,color:#000
@@ -55,7 +55,7 @@ flowchart TD
     classDef neutral fill:#f3f4f6,stroke:#4b5563,stroke-width:2px,color:#000
 
     style mac fill:#f1f5f9,stroke:#334155,stroke-width:2px,color:#000
-    style lead fill:#ffffff,stroke:#1e293b,stroke-width:2px,color:#000
+    style sinatra fill:#ffffff,stroke:#1e293b,stroke-width:2px,color:#000
     style subagents fill:#ffffff,stroke:#1e293b,stroke-width:2px,color:#000
 
     linkStyle default stroke:#1e293b,stroke-width:2px,color:#000
@@ -63,12 +63,12 @@ flowchart TD
     linkStyle 5 stroke:#475569,stroke-width:2px,stroke-dasharray:5 5,color:#000
 ```
 
-The lead agent is a single Python process. It owns the conversation state, picks tools, and decides when to delegate. Inbound user messages arrive as HMAC-signed webhook POSTs from AMC; outbound replies and read-acks go back over AMC's REST API. Delegation tools spawn subprocess children in isolated git worktrees, register them in SQLite, and (for long jobs) hand control to a DBOS workflow that polls and reports. The active SOUL (`souls/<active>.md`) is prepended to `prompts/system.md` at boot to give the agent a consistent voice without entangling personality with operational rules.
+Sinatra is a single Python process. It owns the conversation state, picks tools, and decides when to delegate. Inbound user messages arrive as HMAC-signed webhook POSTs from AMC; outbound replies and read-acks go back over AMC's REST API. Delegation tools spawn subprocess children in isolated git worktrees, register them in SQLite, and (for long jobs) hand control to a DBOS workflow that polls and reports. The active SOUL (`souls/<active>.md`) is prepended to `prompts/system.md` at boot to give Sinatra a consistent voice without entangling personality with operational rules.
 
 ## Project structure
 
 ```
-lead-agent/
+sinatra/
 ├── pyproject.toml
 ├── README.md
 ├── .env                          # API keys + AMC bearer/secret
@@ -76,7 +76,7 @@ lead-agent/
 ├── souls/                        # Personalities. One file per persona.
 │   ├── default.md                # Active soul (selected via [soul] in config)
 │   └── concise.md                # Example alternate persona
-├── lead_agent/
+├── sinatra/
 │   ├── __init__.py
 │   ├── main.py                   # Entry point. Boots agent, AMC listener, DBOS.
 │   ├── agent.py                  # Pydantic AI Agent + composite (SOUL+system) prompt
@@ -104,21 +104,21 @@ lead-agent/
 ├── tests/
 │   └── ...
 └── scripts/
-    └── com.you.leadagent.plist   # launchd template for Mac mini
+    └── com.you.sinatra.plist     # launchd template for Mac mini
 ```
 
 ## Core components
 
-### The lead agent
+### Sinatra itself
 
-The lead agent is a single Pydantic AI `Agent` with a small, carefully chosen tool surface. It does not try to be clever. Its only job is routing, brief-writing, and reporting.
+Sinatra is a single Pydantic AI `Agent` with a small, carefully chosen tool surface. It does not try to be clever. Its only job is routing, brief-writing, and reporting.
 
 ```python
-# lead_agent/agent.py
+# sinatra/agent.py
 from dataclasses import dataclass
 from pathlib import Path
 from pydantic_ai import Agent, RunContext
-from .deps import LeadDeps
+from .deps import SinatraDeps
 from .tools import basic, claude_code, codex, delegations
 from .config import settings
 
@@ -129,17 +129,17 @@ OPS  = HERE.joinpath("prompts/system.md").read_text()
 # SOUL first (voice/personality), then operational rules. Cache-stable region.
 INSTRUCTIONS = f"{SOUL}\n\n---\n\n{OPS}"
 
-lead_agent = Agent(
+sinatra = Agent(
     "anthropic:claude-sonnet-4-6",        # Default; override per-run for cheap routing
-    deps_type=LeadDeps,
+    deps_type=SinatraDeps,
     instructions=INSTRUCTIONS,
 )
 
 # Register tools
-basic.register(lead_agent)
-claude_code.register(lead_agent)
-codex.register(lead_agent)
-delegations.register(lead_agent)
+basic.register(sinatra)
+claude_code.register(sinatra)
+codex.register(sinatra)
+delegations.register(sinatra)
 ```
 
 The system prompt is the contract. `prompts/system.md` describes available tools, when to delegate vs handle directly, how to brief subagents, and how to report results back to you. Keep it under 1500 tokens. The active SOUL is prepended to it at boot — see the *Persona via SOUL* section below for what belongs in each file. Voice goes in SOUL, operational rules go in `system.md`; do not mix them.
@@ -159,13 +159,13 @@ A sketch of the routing logic in the system prompt:
 Pydantic AI's dependency injection is the right place for shared infrastructure: the SQLite connection, the path to your projects directory, the AMC client. This keeps tools testable and avoids global state.
 
 ```python
-# lead_agent/deps.py
+# sinatra/deps.py
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 
 @dataclass
-class LeadDeps:
+class SinatraDeps:
     db: sqlite3.Connection
     amc: "AMCClient"          # Used by the listener for send / mark_read
     workspaces_root: Path     # Where subagent worktrees live
@@ -175,17 +175,17 @@ class LeadDeps:
 
 ### Tool: delegate to Claude Code
 
-This is the heart of the orchestrator. The tool spawns Claude Code as a subprocess in a fresh git worktree, captures its session ID, persists everything, and returns a delegation handle to the lead agent.
+This is the heart of Sinatra. The tool spawns Claude Code as a subprocess in a fresh git worktree, captures its session ID, persists everything, and returns a delegation handle back to the agent.
 
 ```python
-# lead_agent/tools/claude_code.py
+# sinatra/tools/claude_code.py
 import asyncio
 import json
 import uuid
 from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic_ai import RunContext
-from ..deps import LeadDeps
+from ..deps import SinatraDeps
 
 class DelegationHandle(BaseModel):
     delegation_id: str
@@ -211,7 +211,7 @@ class ClaudeCodeBrief(BaseModel):
 def register(agent):
     @agent.tool
     async def delegate_to_claude_code(
-        ctx: RunContext[LeadDeps],
+        ctx: RunContext[SinatraDeps],
         brief: ClaudeCodeBrief,
     ) -> DelegationHandle:
         """Hand a coding task to Claude Code. Returns a delegation handle. Poll
@@ -263,17 +263,17 @@ def register(agent):
 
 A few details worth flagging:
 
-- **Headless mode.** Use `claude -p "<prompt>"` with `--output-format json` so Claude Code emits structured events to stdout. The orchestrator can stream and persist these.
-- **Worktrees, not branches.** Each delegation gets its own git worktree under `~/.lead-agent/workspaces/<id>`. This is how Conductor and similar Mac tools handle parallel coding agents. You can run three Claude Codes against the same repo without merge conflicts.
+- **Headless mode.** Use `claude -p "<prompt>"` with `--output-format json` so Claude Code emits structured events to stdout. Sinatra can stream and persist these.
+- **Worktrees, not branches.** Each delegation gets its own git worktree under `~/.sinatra/workspaces/<id>`. This is how Conductor and similar Mac tools handle parallel coding agents. You can run three Claude Codes against the same repo without merge conflicts.
 - **Permission mode.** `acceptEdits` is permissive. For risky repos, use `default` and surface approval requests back through AMC by sending a question to the originating channel.
-- **Persist before yielding.** The row goes into SQLite before the tool returns. If the lead agent crashes between `subprocess_exec` and the next line, the delegation still gets reaped and tracked.
+- **Persist before yielding.** The row goes into SQLite before the tool returns. If Sinatra crashes between `subprocess_exec` and the next line, the delegation still gets reaped and tracked.
 
 ### Tool: delegate to Codex
 
 Same shape, different binary. Codex CLI's App Server protocol gives you JSON-RPC for fine-grained streaming, but for v1 you can just shell out.
 
 ```python
-# lead_agent/tools/codex.py (sketch)
+# sinatra/tools/codex.py (sketch)
 
 class CodexBrief(BaseModel):
     goal: str
@@ -283,7 +283,7 @@ class CodexBrief(BaseModel):
 
 @agent.tool
 async def delegate_to_codex(
-    ctx: RunContext[LeadDeps],
+    ctx: RunContext[SinatraDeps],
     brief: CodexBrief,
 ) -> DelegationHandle:
     """Hand a coding task to Codex. Prefer this when GPT-5 family models are
@@ -294,12 +294,12 @@ async def delegate_to_codex(
 
 ### Tool: check status, get output, kill
 
-These three are how the lead agent supervises its delegations. They're cheap, side-effect-free, and called frequently.
+These three are how Sinatra supervises its delegations. They're cheap, side-effect-free, and called frequently.
 
 ```python
 @agent.tool
 async def check_delegation_status(
-    ctx: RunContext[LeadDeps],
+    ctx: RunContext[SinatraDeps],
     delegation_id: str,
 ) -> dict:
     """Returns status (running | completed | failed | killed), runtime, last
@@ -307,7 +307,7 @@ async def check_delegation_status(
 
 @agent.tool
 async def get_delegation_output(
-    ctx: RunContext[LeadDeps],
+    ctx: RunContext[SinatraDeps],
     delegation_id: str,
     tail_lines: int = 200,
 ) -> str:
@@ -316,7 +316,7 @@ async def get_delegation_output(
 
 @agent.tool
 async def kill_delegation(
-    ctx: RunContext[LeadDeps],
+    ctx: RunContext[SinatraDeps],
     delegation_id: str,
     reason: str,
 ) -> dict:
@@ -328,13 +328,13 @@ async def kill_delegation(
 The job of DBOS in this architecture is narrow but critical: monitor each running delegation in a workflow that survives process restarts. If you reboot the Mac mini at hour two of a three-hour Claude Code run, the workflow picks up where it left off when the process restarts.
 
 ```python
-# lead_agent/workflows/delegation.py
+# sinatra/workflows/delegation.py
 from dbos import DBOS, WorkflowContext
 
 @DBOS.workflow()
 def monitor_delegation(ctx: WorkflowContext, delegation_id: str, pid: int) -> dict:
     """Long-running workflow that polls a subprocess, captures its output,
-    persists progress, and reports back to the lead agent on completion.
+    persists progress, and reports back to Sinatra on completion.
 
     Survives crashes because DBOS checkpoints state to Postgres / SQLite
     after every step."""
@@ -357,13 +357,13 @@ Why not just rely on Pydantic AI's own agent durability? Because it covers the a
 
 **Subprocess output is drained continuously, not polled.** The kernel pipe buffer for a subprocess's `stdout` is ~64 KB on macOS. If the workflow only polls every 10 seconds without actively reading the pipe, a chatty Claude Code run fills the buffer and the subprocess blocks on write — appearing to hang at minute three. Spec it as a dedicated asyncio reader task per delegation that drains `stdout` continuously into the batched-insert buffer described in *SQLite hardening*. The workflow's poll step only checks `returncode` and flushes batches. The reader task is registered as a `@DBOS.step` so its progress is checkpointed.
 
-**Restart contract.** When launchd restarts the process at minute 45 of a 90-minute run, the subprocess is orphaned and macOS will eventually reap it. On restart, DBOS sees the workflow is unfinished and re-enters from its last completed step. The workflow's first step is to **re-spawn Claude Code with `claude --resume <session_id>`**, using the session ID captured on the delegation row — Claude Code supports session resume. Don't try to re-attach to a surviving subprocess by `pid`; that's fragile across reboots and launchd restart cycles. Resumes are deterministic; re-attaches are not.
+**Restart contract.** When launchd restarts Sinatra at minute 45 of a 90-minute run, the subprocess is orphaned and macOS will eventually reap it. On restart, DBOS sees the workflow is unfinished and re-enters from its last completed step. The workflow's first step is to **re-spawn Claude Code with `claude --resume <session_id>`**, using the session ID captured on the delegation row — Claude Code supports session resume. Don't try to re-attach to a surviving subprocess by `pid`; that's fragile across reboots and launchd restart cycles. Resumes are deterministic; re-attaches are not.
 
 **`notify_user` is not an agent tool.** When a delegation completes, the workflow calls `amc.send` directly via `transport/amc_client.py` using the `parent_thread_id` on the delegation row, with the summary it just generated. Do not re-enter the agent loop on completion. The "one output per turn" rule conflicts with autonomous send-on-completion, the workflow already has everything it needs to write the message, and re-entering opens a much larger surface (model call, tool selection, history loading) for what is fundamentally a one-line "done" notification.
 
 ### Persona via SOUL
 
-The harness has a personality layer modeled on OpenClaw's [`SOUL.md`](https://docs.openclaw.ai/concepts/soul). The point is to isolate *voice* — tone, opinions, brevity, humor, default level of bluntness — from operational rules. Mixing them tends to produce two failure modes: an agent that sounds bland and corporate because the system prompt is all rules, or an agent whose tone leaks into how it picks tools because everything is one giant blob. Splitting them keeps each layer authoring-friendly.
+Sinatra has a personality layer modeled on OpenClaw's [`SOUL.md`](https://docs.openclaw.ai/concepts/soul). The point is to isolate *voice* — tone, opinions, brevity, humor, default level of bluntness — from operational rules. Mixing them tends to produce two failure modes: an agent that sounds bland and corporate because the system prompt is all rules, or an agent whose tone leaks into how it picks tools because everything is one giant blob. Splitting them keeps each layer authoring-friendly.
 
 **Layout.** Personalities live as plain markdown files in `souls/`. One file per persona — `default.md`, `concise.md`, etc. The active soul is selected in `config.toml`:
 
@@ -383,9 +383,9 @@ Switching personas is a config change plus restart in v0. A runtime swap tool ca
 - **Continuity** — how it refers to past conversations and ongoing work.
 - **Related** — pointers to other files (AGENTS-equivalent, tool docs, project memory) for the curious reader.
 
-**Loading.** At process start, `lead_agent/agent.py` reads `souls/<active>.md` and prepends it to `prompts/system.md` to form the `instructions=` value passed into `Agent(...)`. SOUL goes first so it sits in the cache-stable region above the tool descriptions Pydantic AI appends. The composite prompt is constructed once per process, not per run.
+**Loading.** At process start, `sinatra/agent.py` reads `souls/<active>.md` and prepends it to `prompts/system.md` to form the `instructions=` value passed into `Agent(...)`. SOUL goes first so it sits in the cache-stable region above the tool descriptions Pydantic AI appends. The composite prompt is constructed once per process, not per run.
 
-**Scope rule: orchestrator only.** SOUL is **not** included in delegation briefs. `tools/claude_code.py` and `tools/codex.py` build their prompts from `prompts/delegation_brief.md` plus the structured `Brief` model — never from SOUL. Subagents do real work in real repos; they should be neutral and goal-focused. The voice belongs to the user-facing turn.
+**Scope rule: Sinatra only.** SOUL is **not** included in delegation briefs. `tools/claude_code.py` and `tools/codex.py` build their prompts from `prompts/delegation_brief.md` plus the structured `Brief` model — never from SOUL. Subagents do real work in real repos; they should be neutral and goal-focused. The voice belongs to the user-facing turn.
 
 **Authoring guide.** Concrete behavioral rules beat abstract values. A few examples in the spirit of OpenClaw's template:
 
@@ -393,8 +393,8 @@ Switching personas is a config change plus restart in v0. A runtime swap tool ca
 # SOUL — default
 
 ## Core Truths
-You are my orchestrator, not a chatbot. You delegate when the task warrants it
-and answer directly when it doesn't.
+You are Sinatra, my orchestrator — not a chatbot. You delegate when the task
+warrants it and answer directly when it doesn't.
 
 ## Vibe
 - Brevity is mandatory. If the answer fits in one sentence, give one sentence.
@@ -411,17 +411,17 @@ Keep each soul under ~50 lines. Skip life stories, mission statements, and "main
 
 ### Safety boundaries and approvals
 
-**`shell_exec` is not a free tool.** As named in `tools/basic.py` it would let the model run any command. For a harness with internet access on a personal machine, that's a footgun. Constrain it: an allowlist of binaries (`git`, `ls`, `rg`, `cat`, `pwd`, `which`, `head`, `tail`, ...), reject shell metacharacters (`;`, `&&`, `||`, `|`, backticks, `$(...)`), reject `sudo`, and reject paths outside `projects_root` and `workspaces_root`. Anything outside the allowlist routes through the approval flow below — it never just runs.
+**`shell_exec` is not a free tool.** As named in `tools/basic.py` it would let the model run any command. For a process with internet access on a personal machine, that's a footgun. Constrain it: an allowlist of binaries (`git`, `ls`, `rg`, `cat`, `pwd`, `which`, `head`, `tail`, ...), reject shell metacharacters (`;`, `&&`, `||`, `|`, backticks, `$(...)`), reject `sudo`, and reject paths outside `projects_root` and `workspaces_root`. Anything outside the allowlist routes through the approval flow below — it never just runs.
 
-**Approval flows.** Some calls — non-allowlisted shells, delegations against repos outside `projects_root`, `kill_delegation`, anything destructive — should pause and ask. The wait must survive restarts, so it lives inside a DBOS workflow: the agent sends a question to AMC tagged with an `approval_id`, the workflow does `DBOS.recv(approval_id, timeout=...)`, and the next inbound webhook with a matching `approval_id` resumes the workflow with the user's answer. Pydantic AI supports tool approval natively (v2 roadmap item); spec the envelope shape now — `{ approval_id, prompt, options }` outbound, `{ approval_id, choice }` inbound — so `tools/basic.py` and `tools/claude_code.py` can be written against the same primitive.
+**Approval flows.** Some calls — non-allowlisted shells, delegations against repos outside `projects_root`, `kill_delegation`, anything destructive — should pause and ask. The wait must survive restarts, so it lives inside a DBOS workflow: Sinatra sends a question to AMC tagged with an `approval_id`, the workflow does `DBOS.recv(approval_id, timeout=...)`, and the next inbound webhook with a matching `approval_id` resumes the workflow with the user's answer. Pydantic AI supports tool approval natively (v2 roadmap item); spec the envelope shape now — `{ approval_id, prompt, options }` outbound, `{ approval_id, choice }` inbound — so `tools/basic.py` and `tools/claude_code.py` can be written against the same primitive.
 
 ### Memory and state
 
 Two stores, both in the same SQLite file:
 
-**Conversation memory.** Per-thread message history, keyed by AMC `channel_id` (prefixed `amc:` to leave room for future sources). Used by the lead agent to maintain context with you across messages. Implement as a simple table with `(thread_id, ts, role, content)` and feed the last N messages into each agent run via `message_history`.
+**Conversation memory.** Per-thread message history, keyed by AMC `channel_id` (prefixed `amc:` to leave room for future sources). Used by Sinatra to maintain context with you across messages. Implement as a simple table with `(thread_id, ts, role, content)` and feed the last N messages into each agent run via `message_history`.
 
-**Delegation state.** The source of truth for "what is the agent currently working on." Schema:
+**Delegation state.** The source of truth for "what is Sinatra currently working on." Schema:
 
 ```sql
 CREATE TABLE delegations (
@@ -477,54 +477,77 @@ Until one fires, SQLite removes a moving part on an always-on personal box. The 
 
 ## Messaging via AMC
 
-The harness does not own messaging. A separate process — [AMC](file:///Users/ada/amc), the Agent Messaging Channel — handles iMessage and Discord (and any future connectors) and exposes a normalized HTTP/webhook API on `127.0.0.1:8080`. AMC owns the platform connectors, the sender allowlist, the quarantine flow, and the canonical message envelope. The lead agent is just one of its consumers.
+Sinatra does not own messaging. A separate process — [AMC](file:///Users/ada/prod/amc), the Agent Messaging Channel — handles iMessage and Discord (and any future connectors) and exposes a normalized HTTP/webhook API on `127.0.0.1:8080`. AMC owns the platform connectors, the sender allowlist, the quarantine flow, and the canonical message envelope. Sinatra is just one of its consumers.
 
-This is a deliberate boundary. Connector code (Apple chat.db scraping, Discord gateway, etc.) is fiddly and stateful; keeping it in its own process means it can crash and restart without touching agent state, and means new connectors land in AMC without any change to the harness.
+This is a deliberate boundary. Connector code (Apple chat.db scraping, Discord gateway, etc.) is fiddly and stateful; keeping it in its own process means it can crash and restart without touching Sinatra's state, and means new connectors land in AMC without any change to Sinatra.
 
-**Inbound (webhook push).** AMC POSTs HMAC-SHA256-signed envelopes to a webhook URL of our choosing. The lead agent runs a small FastAPI listener at `lead_agent/transport/amc_listener.py`:
+**Inbound (webhook push).** AMC POSTs HMAC-SHA256-signed envelopes to a webhook URL of our choosing. The signature is `X-AMC-Signature: sha256=<hex>` over the raw body, and AMC's outbound HTTP client has a **10-second timeout** before it treats the delivery as failed and retries. So the listener has two jobs and only two: verify the signature, and enqueue the envelope to a per-channel worker. The agent run happens in the worker, not in the request handler.
 
 ```python
-# lead_agent/transport/amc_listener.py (sketch)
+# sinatra/transport/amc_listener.py (sketch)
 import hmac, hashlib
-from fastapi import FastAPI, Header, HTTPException, Request
-from .amc_client import amc
-from ..agent import lead_agent
-from ..memory.conversation import load_history, save_message
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from ..config import settings
+from .dispatcher import dispatch  # per-channel ordered queue
 
 app = FastAPI()
 
 @app.post("/amc/webhook")
-async def on_amc(req: Request, x_amc_signature: str = Header(...)):
+async def on_amc(
+    req: Request,
+    x_amc_signature: str  = Header(..., alias="X-AMC-Signature"),
+    x_amc_delivery_id: str = Header(..., alias="X-AMC-Delivery-Id"),
+):
     body = await req.body()
-    expected = hmac.new(settings.amc.webhook_secret.encode(),
-                       body, hashlib.sha256).hexdigest()
+    expected = "sha256=" + hmac.new(
+        settings.amc.webhook_secret.encode(), body, hashlib.sha256
+    ).hexdigest()
     if not hmac.compare_digest(expected, x_amc_signature):
         raise HTTPException(401, "bad signature")
 
-    env = await req.json()                   # AMC envelope
+    # Dedupe on delivery-id (the contract for retries). LRU cache is fine; the
+    # window only needs to cover AMC's max retry horizon (~13 min across the
+    # 1s/5s/30s/2m/10m schedule).
+    if not dispatch.note_delivery(x_amc_delivery_id):
+        return Response(status_code=204)
+
+    env = await req.json()
+    dispatch.enqueue(env)        # routes to a per-channel asyncio worker
+    return Response(status_code=204)
+```
+
+The dispatcher runs one worker per `channel_id` so two near-simultaneous messages from the same user process in arrival order. Different channels run in parallel. Each worker pulls an envelope, loads history, runs the agent, persists, sends the reply, and marks read:
+
+```python
+# sinatra/transport/dispatcher.py (sketch)
+async def _handle(env: dict) -> None:
     thread_id = f"amc:{env['channel_id']}"
     history   = load_history(thread_id, limit=20)
-
-    result = await lead_agent.run(env["text"], deps=deps, message_history=history)
-
+    result    = await sinatra.run(env["text"], deps=deps, message_history=history)
     save_message(thread_id, "user",      env["text"])
     save_message(thread_id, "assistant", result.output)
     await amc.send(channel_id=env["channel_id"], text=result.output)
-    await amc.mark_read(message_id=env["id"])
-    return {"ok": True}
+    await amc.mark_read(message_ids=[env["id"]])
 ```
 
 A few details worth flagging:
 
-- **Signature verification first.** Reject anything that doesn't match `X-AMC-Signature` before parsing or logging the body.
-- **Idempotency by envelope `id`.** AMC retries on transient failures. At the top of the handler, insert `env["id"]` into a `processed_webhooks(id PRIMARY KEY, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)` table with `ON CONFLICT DO NOTHING`; if no row was inserted, return `200 {"ok": true}` without running the agent. Otherwise a retried delivery double-replies.
+- **Signature verification first.** Reject anything that doesn't match `X-AMC-Signature` before parsing or logging the body. AMC's signature is the literal string `sha256=<hex>`, not raw hex — prefix the expected value or strip the header before comparing.
+- **Fast-ACK is mandatory.** AMC's HTTP timeout is 10s and a single agent turn easily blows past that. ACKing `204` after dedupe means a retried delivery never piles up behind a slow run. AMC ships a working reference of this exact pattern at [`webhook-receiver/src/amc_receiver/dispatcher.py`](file:///Users/ada/prod/amc/webhook-receiver/src/amc_receiver/dispatcher.py); read it before writing your own.
+- **Dedupe on `X-AMC-Delivery-Id`.** AMC retries carry the same delivery-id; that's the canonical retry key. An LRU keyed by delivery-id covers the ~13-minute retry window without growing unbounded. `env["id"]` is the message id and not what AMC retries against.
+- **AMC dead-letters after 5 attempts** (backoff `1s, 5s, 30s, 2m, 10m`). If Sinatra is offline more than ~13 minutes, those deliveries are permanently lost from the webhook channel. On boot, run a one-shot `GET /messages/unread` sweep, enqueue any unacked envelopes through the same dispatcher, and only then start serving the webhook. This makes restart-resilience the listener's problem, not AMC's.
 - **`channel_id` is the thread key.** AMC's envelope already namespaces channels (`+15551234567`, `discord:dm:123`, etc.); prefix with `amc:` and use as `thread_id` directly.
-- **Outbound is not an agent tool.** `amc.send` and `amc.mark_read` live in `transport/amc_client.py` and are called by the listener after the run completes — not exposed as Pydantic AI tools. The agent produces output once per turn; the harness delivers it. Making `send` a tool just invites the model to spam the user.
-- **Per-agent cursor.** Set `X-Agent-ID: lead-agent` on every AMC request so AMC can isolate read cursors if you ever run a second consumer alongside this one.
+- **Outbound is not an agent tool.** `amc.send` and `amc.mark_read` live in `transport/amc_client.py` and are called by the dispatcher worker after the run completes — not exposed as Pydantic AI tools. Sinatra produces output once per turn; the harness delivers it. Making `send` a tool just invites the model to spam the user.
+- **Idempotent sends.** `POST /messages/send` honors `Idempotency-Key`. The `amc_client.send` wrapper should generate a fresh UUIDv4 per call so a crash between the SQLite write and the upstream send completing doesn't double-deliver on retry.
+- **`mark_read` takes a list.** The endpoint shape is `{"message_ids": [...]}` — pass a one-element list, not a singular id.
+- **Surface AMC error codes.** AMC returns a stable `{error: {code, message, details}}` envelope. `amc_client` should raise typed exceptions per code so Sinatra can react sensibly: back off on `RATE_LIMITED` (honor `Retry-After`), abandon and notify on `PLATFORM_AUTH` / `PLATFORM_SEND_FAILED` / `CHANNEL_NOT_FOUND`, and reject attachments early on `ATTACHMENT_TOO_LARGE_FOR_PLATFORM`.
+- **Per-agent cursor.** Set `X-Agent-ID: sinatra` on every AMC request so AMC can isolate read cursors if you ever run a second consumer alongside this one.
 
-**Configuration.** AMC's webhook config points at the lead agent: in AMC's `.env`, `AMC_WEBHOOK_URL=http://127.0.0.1:8090/amc/webhook` and `AMC_WEBHOOK_SECRET=<shared>`. In the lead agent's `.env`, `AMC_BASE_URL=http://127.0.0.1:8080`, `AMC_BEARER_TOKEN=<same-as-AMC>`, `AMC_WEBHOOK_SECRET=<same-shared>`, `AMC_AGENT_ID=lead-agent`. The two processes share the bearer token and the webhook secret; nothing else.
+**MCP wrapper (optional path).** AMC also ships a Python MCP wrapper (`uv run --project mcp amc-mcp` in the AMC repo) exposing the four tools `list_unread_messages`, `send_message`, `mark_read`, `get_message_context`. Sinatra doesn't need it — it's a long-lived process talking REST — but Claude Code delegations that need to message you back can be launched with `--mcp-config` pointing at the wrapper. The AMC `webhook-receiver` does this today and is a good template.
 
-**Allowlist lives in AMC.** Adding a phone number or Discord user is a TOML edit at `~/.config/messaging-agent/allowlist.toml`, not a harness concern. Unknown senders quarantine in AMC and never reach the lead agent.
+**Configuration.** AMC's webhook config points at Sinatra: in AMC's `.env`, `AMC_WEBHOOK_URL=http://127.0.0.1:8090/amc/webhook` and `AMC_WEBHOOK_SECRET=<shared>`. In Sinatra's `.env`, `AMC_BASE_URL=http://127.0.0.1:8080`, `AMC_BEARER_TOKEN=<same-as-AMC>`, `AMC_WEBHOOK_SECRET=<same-shared>`, `AMC_AGENT_ID=sinatra`. The two processes share the bearer token and the webhook secret; nothing else.
+
+**Allowlist lives in AMC.** Adding a phone number or Discord user is a TOML edit at `~/.config/messaging-agent/allowlist.toml`, not Sinatra's concern. Unknown senders quarantine in AMC and webhooks only fire for `allowlist_status='allowed'`, so non-allowlisted traffic never reaches Sinatra.
 
 ## Configuration
 
@@ -538,9 +561,9 @@ router = "anthropic:claude-haiku-4-5"      # Cheap model for trivial routing
 heavy  = "anthropic:claude-opus-4-7"       # Hard reasoning, escalations
 
 [paths]
-workspaces_root = "~/.lead-agent/workspaces"
+workspaces_root = "~/.sinatra/workspaces"
 projects_root   = "~/code"
-db_path         = "~/.lead-agent/state.db"
+db_path         = "~/.sinatra/state.db"
 
 [soul]
 active = "default"                          # picks souls/default.md
@@ -548,7 +571,7 @@ dir    = "souls"
 
 [amc]
 base_url    = "http://127.0.0.1:8080"
-agent_id    = "lead-agent"
+agent_id    = "sinatra"
 listen_host = "127.0.0.1"
 listen_port = 8090                          # AMC's AMC_WEBHOOK_URL points here
 
@@ -579,9 +602,9 @@ hard_daily_usd = 75       # refuse new runs; require explicit override
 notify_channel = "amc:default"
 ```
 
-A small accounting helper reads Logfire's per-run cost (or your own per-call accumulator) at agent boot and on a pre-tool-call hook. At soft cap, the agent swaps `default` → `router` for the rest of the day and sends a one-line heads-up via AMC. At hard cap, `lead_agent.run` short-circuits with a "budget exceeded — reply 'override' to continue today" message. Resets at local midnight.
+A small accounting helper reads Logfire's per-run cost (or your own per-call accumulator) at boot and on a pre-tool-call hook. At soft cap, Sinatra swaps `default` → `router` for the rest of the day and sends a one-line heads-up via AMC. At hard cap, `sinatra.run` short-circuits with a "budget exceeded — reply 'override' to continue today" message. Resets at local midnight.
 
-Track delegation cost separately. A 90-minute Claude Code run is its own line item and shouldn't be lumped against the orchestrator's daily cap — spawning one is a deliberate user choice, and budgeting it properly needs per-agent caps later. For v0/v1, just log delegation cost and surface it in the completion notification.
+Track delegation cost separately. A 90-minute Claude Code run is its own line item and shouldn't be lumped against Sinatra's daily cap — spawning one is a deliberate user choice, and budgeting it properly needs per-agent caps later. For v0/v1, just log delegation cost and surface it in the completion notification.
 
 ## Observability
 
@@ -599,27 +622,27 @@ For delegations specifically, log a custom span per delegation lifecycle so you 
 
 ## Deployment on Mac mini
 
-The lead agent is one long-lived Python process that spawns subagent subprocesses on demand. `launchd` is the right tool. Skip `tmux` or `screen`; they don't survive reboots cleanly.
+Sinatra is one long-lived Python process that spawns subagent subprocesses on demand. `launchd` is the right tool. Skip `tmux` or `screen`; they don't survive reboots cleanly.
 
 ```xml
-<!-- ~/Library/LaunchAgents/com.you.leadagent.plist -->
+<!-- ~/Library/LaunchAgents/com.you.sinatra.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.you.leadagent</string>
+    <string>com.you.sinatra</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/you/.lead-agent/.venv/bin/python</string>
+        <string>/Users/you/.sinatra/.venv/bin/python</string>
         <string>-m</string>
-        <string>lead_agent.main</string>
+        <string>sinatra.main</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/you/.lead-agent</string>
+    <string>/Users/you/.sinatra</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/Users/you/.lead-agent/.venv/bin</string>
+        <string>/usr/local/bin:/usr/bin:/bin:/Users/you/.sinatra/.venv/bin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -629,18 +652,18 @@ The lead agent is one long-lived Python process that spawns subagent subprocesse
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/you/.lead-agent/logs/stdout.log</string>
+    <string>/Users/you/.sinatra/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/you/.lead-agent/logs/stderr.log</string>
+    <string>/Users/you/.sinatra/logs/stderr.log</string>
 </dict>
 </plist>
 ```
 
-Load with `launchctl load ~/Library/LaunchAgents/com.you.leadagent.plist`. The `KeepAlive` block restarts the process if it crashes, and `RunAtLoad` starts it when you log in.
+Load with `launchctl load ~/Library/LaunchAgents/com.you.sinatra.plist`. The `KeepAlive` block restarts the process if it crashes, and `RunAtLoad` starts it when you log in.
 
 A few Mac mini specifics worth getting right:
 
-- **AMC is a sibling launchd job.** AMC has its own `com.you.amc.plist`. The lead agent depends on AMC being up but does not supervise it. If AMC is down, webhook deliveries simply queue inside AMC (per its retry worker) and arrive when the lead agent's listener is reachable again.
+- **AMC is a sibling launchd job.** AMC has its own `com.you.amc.plist`. Sinatra depends on AMC being up but does not supervise it. If AMC is down, webhook deliveries simply queue inside AMC (per its retry worker) and arrive when Sinatra's listener is reachable again.
 - **Disable App Nap** for the venv's Python, or long-running runs may throttle when the user session is inactive.
 - **Caffeinate when delegations are active.** A small helper that runs `caffeinate -i` while any delegation is in `running` state prevents the machine from sleeping mid-task.
 - **Filesystem.** Worktrees on the SSD, not on iCloud Drive. Git worktrees in iCloud are a recipe for corrupted repos.
@@ -651,20 +674,20 @@ A realistic build order:
 
 1. **v0 (one weekend).** Pydantic AI agent with `web_search`, `shell_exec`, `delegate_to_claude_code`. AMC webhook listener wired up. One soul (`souls/default.md`). SQLite for delegation state. Synchronous delegation with a hard timeout. No DBOS yet. Goal: prove the loop works end-to-end — message in via AMC, reply out via AMC, one delegation completes.
 
-2. **v1 (next weekend).** Add `delegate_to_codex`, `check_delegation_status`, `get_delegation_output`, `kill_delegation`. Add DBOS-backed `monitor_delegation` workflow. Add Logfire. Goal: 90-minute delegations work and survive a `kill -9` of the lead agent.
+2. **v1 (next weekend).** Add `delegate_to_codex`, `check_delegation_status`, `get_delegation_output`, `kill_delegation`. Add DBOS-backed `monitor_delegation` workflow. Add Logfire. Goal: 90-minute delegations work and survive a `kill -9` of Sinatra.
 
 3. **v2.** Additional personas in `souls/`. Per-project memory files. Multi-delegation summaries. Approval flows for risky tool calls (Pydantic AI supports tool approval natively).
 
-4. **v3+.** Calendar awareness, scheduled tasks, evals (Pydantic Evals) for routing decisions, second opinions across delegations. New connectors (Slack, etc.) land in AMC, not here — the harness gets them for free.
+4. **v3+.** Calendar awareness, scheduled tasks, evals (Pydantic Evals) for routing decisions, second opinions across delegations. New connectors (Slack, etc.) land in AMC, not here — Sinatra gets them for free.
 
-Resist building v3 features into v0. The harness is small on purpose.
+Resist building v3 features into v0. Sinatra is small on purpose.
 
 ## Why this works for your case
 
-- The harness stays small (~500 lines of Python plus a handful of markdown files in `souls/` and `prompts/`). You can read and modify it.
+- Sinatra stays small (~500 lines of Python plus a handful of markdown files in `souls/` and `prompts/`). You can read and modify it.
 - Pydantic AI gives you the agent loop, structured tools, dependency injection, durable execution adapters, observability, and model flexibility for free.
 - DBOS handles the "long-running task survives restarts" problem that no agent SDK solves cleanly on its own.
 - AMC is reused, not reinvented. iMessage, Discord, and any future connectors live behind a single normalized envelope you don't own and don't have to maintain.
-- SOUL keeps voice editable as plain markdown, separate from operational rules. Tweaking how the agent sounds doesn't risk breaking how it routes.
+- SOUL keeps voice editable as plain markdown, separate from operational rules. Tweaking how Sinatra sounds doesn't risk breaking how it routes.
 - Claude Code and Codex stay in the roles they're best at (coding subagents) and never have to be your orchestrator.
 - The whole thing runs on a Mac mini, costs only the API tokens you actually use, and you own every line.
