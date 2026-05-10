@@ -355,6 +355,12 @@ Pydantic AI's docs explicitly call out DBOS, Temporal, and Prefect as supported 
 
 Why not just rely on Pydantic AI's own agent durability? Because it covers the agent loop (model calls, tool execution) but not unbounded subprocess monitoring. You want the workflow layer for "this delegation will run for an hour or more."
 
+**Subprocess output is drained continuously, not polled.** The kernel pipe buffer for a subprocess's `stdout` is ~64 KB on macOS. If the workflow only polls every 10 seconds without actively reading the pipe, a chatty Claude Code run fills the buffer and the subprocess blocks on write — appearing to hang at minute three. Spec it as a dedicated asyncio reader task per delegation that drains `stdout` continuously into the batched-insert buffer described in *SQLite hardening*. The workflow's poll step only checks `returncode` and flushes batches. The reader task is registered as a `@DBOS.step` so its progress is checkpointed.
+
+**Restart contract.** When launchd restarts the process at minute 45 of a 90-minute run, the subprocess is orphaned and macOS will eventually reap it. On restart, DBOS sees the workflow is unfinished and re-enters from its last completed step. The workflow's first step is to **re-spawn Claude Code with `claude --resume <session_id>`**, using the session ID captured on the delegation row — Claude Code supports session resume. Don't try to re-attach to a surviving subprocess by `pid`; that's fragile across reboots and launchd restart cycles. Resumes are deterministic; re-attaches are not.
+
+**`notify_user` is not an agent tool.** When a delegation completes, the workflow calls `amc.send` directly via `transport/amc_client.py` using the `parent_thread_id` on the delegation row, with the summary it just generated. Do not re-enter the agent loop on completion. The "one output per turn" rule conflicts with autonomous send-on-completion, the workflow already has everything it needs to write the message, and re-entering opens a much larger surface (model call, tool selection, history loading) for what is fundamentally a one-line "done" notification.
+
 ### Persona via SOUL
 
 The harness has a personality layer modeled on OpenClaw's [`SOUL.md`](https://docs.openclaw.ai/concepts/soul). The point is to isolate *voice* — tone, opinions, brevity, humor, default level of bluntness — from operational rules. Mixing them tends to produce two failure modes: an agent that sounds bland and corporate because the system prompt is all rules, or an agent whose tone leaks into how it picks tools because everything is one giant blob. Splitting them keeps each layer authoring-friendly.
@@ -403,6 +409,12 @@ and answer directly when it doesn't.
 
 Keep each soul under ~50 lines. Skip life stories, mission statements, and "maintain a positive supportive experience" mush — those are the patterns OpenClaw flags as ineffective. If a rule wouldn't change a single response, it doesn't belong here.
 
+### Safety boundaries and approvals
+
+**`shell_exec` is not a free tool.** As named in `tools/basic.py` it would let the model run any command. For a harness with internet access on a personal machine, that's a footgun. Constrain it: an allowlist of binaries (`git`, `ls`, `rg`, `cat`, `pwd`, `which`, `head`, `tail`, ...), reject shell metacharacters (`;`, `&&`, `||`, `|`, backticks, `$(...)`), reject `sudo`, and reject paths outside `projects_root` and `workspaces_root`. Anything outside the allowlist routes through the approval flow below — it never just runs.
+
+**Approval flows.** Some calls — non-allowlisted shells, delegations against repos outside `projects_root`, `kill_delegation`, anything destructive — should pause and ask. The wait must survive restarts, so it lives inside a DBOS workflow: the agent sends a question to AMC tagged with an `approval_id`, the workflow does `DBOS.recv(approval_id, timeout=...)`, and the next inbound webhook with a matching `approval_id` resumes the workflow with the user's answer. Pydantic AI supports tool approval natively (v2 roadmap item); spec the envelope shape now — `{ approval_id, prompt, options }` outbound, `{ approval_id, choice }` inbound — so `tools/basic.py` and `tools/claude_code.py` can be written against the same primitive.
+
 ### Memory and state
 
 Two stores, both in the same SQLite file:
@@ -435,6 +447,33 @@ CREATE TABLE delegation_output (
 ```
 
 For project-specific knowledge (preferences, conventions, "this repo uses pnpm not npm"), start with a flat markdown file per project loaded into the system prompt at run time. Avoid a vector database until you have a concrete reason for one. Hermes does FTS5 full-text search across past conversations, which is a reasonable next step if simple recall isn't enough.
+
+**SQLite hardening.** The defaults will bite you at 3am. Set these pragmas at boot before any other SQL runs:
+
+```sql
+PRAGMA journal_mode = WAL;             -- many readers + one writer
+PRAGMA synchronous  = NORMAL;          -- WAL-safe, faster than FULL
+PRAGMA fullfsync    = ON;              -- macOS: actually flush to platter
+PRAGMA busy_timeout = 5000;            -- ms; retry on lock contention
+PRAGMA journal_size_limit = 67108864;  -- 64 MB cap on WAL growth
+```
+
+Two app-layer rules go with the pragmas:
+
+- **Every write transaction starts with `BEGIN IMMEDIATE`.** Read-then-upgrade transactions bypass `busy_timeout` and return `SQLITE_BUSY` the moment another writer commits in between. Wrap writes in a retry helper that catches `SQLITE_BUSY` and sleeps a few milliseconds before retrying.
+- **Batch the streaming output writes.** A 90-minute Claude Code run can emit tens of thousands of chunks; one autocommit per chunk is the slow path. Buffer for ~50 ms or ~100 chunks per insert, whichever fires first.
+
+Run [Litestream](https://litestream.io) replicating the SQLite file to a local folder and a cloud bucket from day one. Continuous WAL streaming, point-in-time restore, near-zero ops cost.
+
+**Output retention.** `delegation_output` grows unbounded and will dominate DB size — a single chatty run can add hundreds of megabytes. Run a nightly job that prunes raw chunks older than seven days, keeping only the LLM-generated summary stored on the `delegations` row, then `PRAGMA wal_checkpoint(TRUNCATE)` to reclaim WAL space. Keep the policy in code, not in your head.
+
+**When to migrate to Postgres.** SQLite is correct for v0/v1. Remote access from your phone or another laptop is an app-layer concern — AMC plus the FastAPI listener handle it — not a database concern. Migrate when **any one** of these triggers fires:
+
+1. A second long-lived process needs to share DBOS workflow state. DBOS supports both backends, but multi-instance coordination requires Postgres.
+2. You commit to vector memory in the same store. `pgvector` with HNSW is cleaner than running `sqlite-vec` as a separate moving part.
+3. You move off the Mac mini to a VPS and want managed Postgres (Neon, Supabase, RDS) rather than running SQLite + Litestream there.
+
+Until one fires, SQLite removes a moving part on an always-on personal box. The migration itself is `pgloader sqlite:// postgresql://` plus app-layer cleanup of dialect quirks — half a day if you kept SQL portable in a thin DAL, two days if you leaned on SQLite-isms. Don't pre-migrate.
 
 ## Messaging via AMC
 
@@ -478,6 +517,7 @@ async def on_amc(req: Request, x_amc_signature: str = Header(...)):
 A few details worth flagging:
 
 - **Signature verification first.** Reject anything that doesn't match `X-AMC-Signature` before parsing or logging the body.
+- **Idempotency by envelope `id`.** AMC retries on transient failures. At the top of the handler, insert `env["id"]` into a `processed_webhooks(id PRIMARY KEY, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)` table with `ON CONFLICT DO NOTHING`; if no row was inserted, return `200 {"ok": true}` without running the agent. Otherwise a retried delivery double-replies.
 - **`channel_id` is the thread key.** AMC's envelope already namespaces channels (`+15551234567`, `discord:dm:123`, etc.); prefix with `amc:` and use as `thread_id` directly.
 - **Outbound is not an agent tool.** `amc.send` and `amc.mark_read` live in `transport/amc_client.py` and are called by the listener after the run completes — not exposed as Pydantic AI tools. The agent produces output once per turn; the harness delivers it. Making `send` a tool just invites the model to spam the user.
 - **Per-agent cursor.** Set `X-Agent-ID: lead-agent` on every AMC request so AMC can isolate read cursors if you ever run a second consumer alongside this one.
@@ -526,6 +566,22 @@ logfire_enabled = true
 ```
 
 API keys and shared secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `LOGFIRE_TOKEN`, `AMC_BEARER_TOKEN`, `AMC_WEBHOOK_SECRET`) live in `.env` and never in `config.toml`.
+
+## Cost caps
+
+Opus 4.7 makes it easy to burn $100 in an afternoon during a long debug session. Cap it.
+
+```toml
+# config.toml addition
+[budget]
+soft_daily_usd = 25       # downgrade `default` → `router`, send heads-up via AMC
+hard_daily_usd = 75       # refuse new runs; require explicit override
+notify_channel = "amc:default"
+```
+
+A small accounting helper reads Logfire's per-run cost (or your own per-call accumulator) at agent boot and on a pre-tool-call hook. At soft cap, the agent swaps `default` → `router` for the rest of the day and sends a one-line heads-up via AMC. At hard cap, `lead_agent.run` short-circuits with a "budget exceeded — reply 'override' to continue today" message. Resets at local midnight.
+
+Track delegation cost separately. A 90-minute Claude Code run is its own line item and shouldn't be lumped against the orchestrator's daily cap — spawning one is a deliberate user choice, and budgeting it properly needs per-agent caps later. For v0/v1, just log delegation cost and surface it in the completion notification.
 
 ## Observability
 
